@@ -1,0 +1,13 @@
+body{
+    width: 100%;
+    height: 100%;
+    
+}
+.table{
+    min-width: none;
+    max-width: 0vw;
+    height: 100%;
+    background-color: #fff;
+    border: 1px solid #000;
+    border-collapse: collapse;
+}

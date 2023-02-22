@@ -9,7 +9,7 @@
 import importlib
 import subprocess
 
-packages = ["flask", "requests", "urllib", "pytz", "datetime"]
+packages = ["flask", "requests", "urllib", "pytz", "datetime", "uuid", "pandas"]
 for package in packages:
     try:
         importlib.import_module(package)
@@ -23,26 +23,24 @@ from uuid import uuid4
 import requests
 import requests.auth
 import urllib
-import datetime
-from pytz import timezone
+from datetime import datetime, timezone, timedelta
+import pandas as pd
 
 REDIRECT_URI = (
     "http://localhost:65010/zoom_callback"  # This must match your app's settings
 )
-CLIENT_ID = ""  # This is your app's client ID
-CLIENT_SECRET = ""  # This is your app's client secret
-SECRET_TOKEN = ""  # This is your app's secret token
+CLIENT_ID = None # This is your app's client ID
+CLIENT_SECRET = None # This is your app's client secret
+SECRET_TOKEN = None  # This is your app's secret token
+
 
 # Session variables
 authenticated = False
 access_token = None
 next_page = False
 next_page_token = None
+json_data = None
 
-# Get data from 7 days ago
-pastDate = datetime.datetime.now() - datetime.timedelta(days=7)
-pastDataZuluTime = pastDate.strftime("%Y-%m-%dT%H:%M:%SZ")
-nowzuluTime = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # Create the Flask app
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -84,19 +82,23 @@ def zoom_callback():
     error = request.args.get("error", "")
     if error:
         return "Error: " + error
+    
+    code = request.args.get("code")
+    access_token = get_token(code)
+    authenticated = True
+    data = get_archive_files(access_token)
 
     if authenticated:  # if already authenticated, just show the archive
         return render_template(
             "archive.html",
             access_token=access_token,
             next_page=next_page,
-            data=get_archive_files(access_token),
+            data=data,
         )
 
-    code = request.args.get("code")
-    access_token = get_token(code)
-    authenticated = True
-
+    
+    
+    
     # Note: In most cases, you'll want to store the access token, in, say,
     # a session for use in other parts of your web app.
 
@@ -104,15 +106,16 @@ def zoom_callback():
         "archive.html",
         access_token=access_token,
         next_page=next_page,
-        data=get_archive_files(access_token),
+        data=data  
     )
+   
 
 
 # process form data from archive.html template
 # convert time to zulu time
 # get data from zoom api
 # show data in archive.html template
-@app.route("/archive_for_dates", methods=["GET"])
+@app.route("/archive/dates", methods=["GET"])
 def archive_for_dates():
     # get the values from the form's input fields
 
@@ -122,57 +125,19 @@ def archive_for_dates():
     response = request.form  # get form data
     from_date = request.args.get("from_date")
     to_date = request.args.get("to_date")
+    
 
-    from_date_zulu = datetime.datetime.strptime(from_date, "%Y-%m-%d").strftime(
+    from_date_zulu = datetime.strptime(from_date, "%Y-%m-%d").strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    print("from_date_zulu: ", from_date_zulu)
-    to_date_zulu = datetime.datetime.strptime(to_date, "%Y-%m-%d").strftime(
+
+    to_date_zulu = datetime.strptime(to_date, "%Y-%m-%d").strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    print("to_date_zulu: ", to_date_zulu)
+    me_json = get_archive_files(access_token, from_date_zulu, to_date_zulu)
 
-    headers = {"Authorization": "bearer " + access_token}
-    response = requests.get(
-        "https://api.zoom.us/v2/archive_files",
-        params={"page_size": 300, "from": from_date_zulu, "to": to_date_zulu},
-        headers=headers,
-    )
-    me_json = response.json()
-
-    if len(me_json["next_page_token"]) != 0:
-        next_page = True
-        next_page_token = me_json["next_page_token"]
-    print("next_page_token: ", next_page_token)
     return render_template(
         "archive.html", access_token=access_token, next_page=next_page, data=me_json
-    )
-
-
-@app.route("/next_page")
-def get_next_page():
-    global next_page
-    global access_token
-    global next_page_token
-    headers = {"Authorization": "bearer " + access_token}
-    response = requests.get(
-        "https://api.zoom.us/v2/archive_files",
-        params={
-            "next_page_token": next_page_token,
-            "page_size": 300,
-            "from": pastDataZuluTime,
-            "to": nowzuluTime,
-        },
-        headers=headers,
-    )
-    data = response.json()
-    if len(data["next_page_token"]) != 0:
-        next_page = True
-        next_page_token = data["next_page_token"]
-    else:
-        next_page = False
-    return render_template(
-        "archive.html", access_token=access_token, next_page=next_page, data=data
     )
 
 
@@ -188,31 +153,74 @@ def get_token(code):
         "https://zoom.us/oauth/token", auth=client_auth, data=post_data
     )
     token_json = response.json()
-    print(token_json)
+
     return token_json["access_token"]
+from datetime import datetime, timezone, timedelta
+import requests
 
 
-def get_archive_files(access_token):
-    global next_page
-    global next_page_token
-    headers = {"Authorization": "bearer " + access_token}
-    response = requests.get(
-        "https://api.zoom.us/v2/archive_files",
-        params={"page_size": 300, "from": pastDataZuluTime, "to": nowzuluTime},
-        headers=headers,
-    )
-    me_json = response.json()
+def get_archive_files(access_token, page_size=300, from_date=None, to_date=None):
+    headers = {"Authorization": "Bearer " + access_token}
+    params = {"page_size": page_size}
 
-    if len(me_json["next_page_token"]) != 0:
-        next_page = True
-        next_page_token = me_json["next_page_token"]
-    print("next_page_token: ", next_page_token)
-    return me_json
+    # Use today - 7 days as default from_date and to_date if not provided
+    if from_date is None:
+        from_date = datetime.now(timezone.utc) - timedelta(days=7)
+        from_date = from_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    if to_date is None:
+        to_date = datetime.now(timezone.utc)
+        to_date = to_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    params["from"] = from_date
+    params["to"] = to_date
+
+    all_records = []
+    next_page_token = ''
+    while True:
+        if next_page_token != '' or next_page_token != None:
+            params["next_page_token"] = next_page_token
+
+        response = requests.get(
+            "https://api.zoom.us/v2/archive_files", params=params, headers=headers
+        )
+        if response.status_code == 200:
+            me_json = response.json()
+            
+            all_records.extend(me_json.get("meetings"))
+            
+            print("total_records: " + str(len(all_records)))
+            if me_json["next_page_token"] != '':
+                next_page_token = me_json["next_page_token"]
+                print("next_page_token: " + next_page_token)
+            else:
+                break
+        else:
+            print(response.status_code)
+            print(response.text)
+            break
+
+    json_data = {
+        "from": from_date,
+        "to": to_date,
+        "page_size": page_size,
+        "total_records": len(all_records),
+        "meetings": all_records
+    }
+    return json_data
 
 
-def write_to_txt(data):
-    with open("data.txt", "w") as f:
+def write_to_txt(data, filename="data.txt"):
+    with open(filename, "w") as f:
         f.write(str(data))
+
+
+def json_to_csv(data):
+    csv = pd.read_json(data)
+    csv = csv.to_csv("data.csv", index=False)
+
+    with open("data.csv", "w") as f:
+        f.write(str(csv))
 
 
 if __name__ == "__main__":
